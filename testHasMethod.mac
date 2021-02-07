@@ -1,0 +1,17 @@
+// import rsexts;
+
+Class MyClass
+    macro Met1
+    end;
+
+
+    macro HasMethod(sMethodName)
+        var mr=R2M(this,sMethodName);
+         PrintLN(mr);
+    end;
+
+end;
+
+var o=MyClass();
+o.HasMethod("met1");
+

@@ -1,0 +1,4 @@
+import xcr;
+
+var rep=XCReport();
+rep.writeRow(1,2,3);

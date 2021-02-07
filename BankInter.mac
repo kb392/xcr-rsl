@@ -1,0 +1,39 @@
+import zipinter;
+import StreamExter;
+
+macro GetRegistryValue
+end;
+
+macro SetRegistryValue
+end;
+
+macro GetApplicationKey
+    return String(Random():o:5)+String(Random():o:5);
+end;
+
+macro GetTypeName(v)
+    var t=ValType(v);
+    if (t==V_INTEGER)  return "Integer";   end;
+    if (t==V_DOUBLE)   return "Double";    end;
+    if (t==V_DOUBLEL)   return "DoubleL";  end;
+    if (t==V_STRING)   return "String";    end;
+    if (t==V_DATE)   return "Date";        end;
+    if (t==V_TIME)   return "Time";        end;
+    if (t==V_DTTM)   return "DateTime";    end;
+    if (t==V_MEMADDR)   return "MemAddr";  end;
+    if (t==V_PROC)   return "ProcRef";     end;
+    if (t==V_R2M)   return "MethodRef";    end;
+    if (t==V_DECIMAL)   return "Decimal";  end;
+    if (t==V_NUMERIC)   return "Numeric";  end;
+    if (t==V_MONEY)   return "Money";      end;
+    if (t==V_MONEYL)   return "MoneyL";    end;
+    if (t==26)   return "SpecVal";         end;
+    if (t==V_UNDEF)   return "Null";       end;
+    if (t==V_FILE)   return "BtFileRef";   end;
+    if (t==V_STRUC)   return "StrucRef";   end;
+    if (t==V_ARRAY)   return "ArrayRef";   end;
+    if (t==V_TXTFILE)   return "TxtFileRef"; end;
+    if (t==V_DBFFILE)   return "DbfFileRef"; end;
+    if (t==V_GENOBJ)   return "Object";      end;
+    return "Unknown type "+String(t);
+end;

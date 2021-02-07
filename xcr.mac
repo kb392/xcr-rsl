@@ -1,0 +1,1977 @@
+/* XCR                                            */
+/* Библиотека получения отчётов в табличной форме */
+import BankInter;
+import rcw;
+import globals;
+import rsexts;
+
+/* проверка терминального макроса */                                                            
+private macro CheckTermTools
+    const sMacroName="termtools.mac";
+    var src_dt:date, src_tm:time, src_size:integer;
+    var dst_dt:date=Date(0,0,0), dst_tm:time=Time(0,0,0), dst_size:integer=0;
+
+    var strDstPath="$MAC\\"+sMacroName;
+
+    var ErrCode;
+    var strTermMacTemplatePath="..\\MAC\\USER_MAC\\.TERMINAL";
+    GetRegistryValue("USER_MAC\\ДИРЕКТОРИИ\\МАКРОСЫ ДЛЯ ТЕРМИНАЛА",V_STRING, strTermMacTemplatePath, ErrCode);
+
+    var strSrcPath=strTermMacTemplatePath+"\\" + sMacroName;
+
+    if (GetFileInfo(strSrcPath, @src_dt, @src_tm, @src_size))
+        GetFileInfo(strDstPath, @dst_dt, @dst_tm, @dst_size);
+        if ((src_dt!=dst_dt) and (src_tm!=dst_tm) or (src_size!=dst_size))
+            if (not CopyFile (strSrcPath, strDstPath))
+                MsgBox("Ошибка копирования макроса на терминал");
+            end;
+        end;
+    else
+        MsgBox("Не найден эталон терминального макроса "+strSrcPath);
+    end;
+end;//macro CheckTermTools 
+
+
+private macro NZ(v,v2)
+    if (valtype(v)==V_UNDEF) 
+        return v2; 
+    else
+        return v;
+    end;
+end; /* macro NZ */
+
+private macro StrRepeat(s:String, N):String
+    var i=0;
+    var sResult:String="";
+
+    N=NZ(N,0);
+    while(i<N)
+        sResult=sResult+s;
+        i=i+1;
+    end;
+    return sResult
+end; /* macro StrRepeat */
+
+/* DEBUG!!! переписать на вменяемый код */
+private macro html(s:@string)
+    s = StrSubst(s, "&" , "&amp;" );
+    s = StrSubst(s, "\"", "&quot;");
+    s = StrSubst(s, "<" , "&lt;"  );
+    s = StrSubst(s, ">" , "&gt;"  );
+    s = StrSubst(s, "" , "&#1;"  );
+    /*
+    var c,i,r="";
+
+    for(i,1,StrLen(s),1)
+        c=substr(s,i,1);
+        if(codefor())
+    end;
+    */
+    return s;
+end;
+
+private macro ODBC_date_format(dt)
+    var d,m,y;
+    DateSplit(dt,d,m,y);
+    return String(y:o:4)+"-"+String(m:o:2)+"-"+String(d:o:2);
+end;
+
+const 
+    XCR_dest_nul=0,
+    XCR_dest_txt=1,
+    XCR_dest_tab=2,
+    XCR_dest_ods=3,
+    XCR_dest_xls=4,
+    XCR_dest_htm=5,
+    XCR_dest_xml=6,
+    XCR_dest_ttt=7,
+    XCR_dest_wkt=8,
+    XCR_dest_odfs=9;
+    XCR_dest_xlsx=10;
+
+Class XCReport()
+    var DestType; /* const XCR_dest_nul */
+    var strDestType; /* aDestTypeText[DestType] */
+    var aDestTypeText=TArray(8);
+    var ob; /* rsax */
+    var Excel;
+    var oSheet;
+    var aVal=TArray(); /* таблица с данными, текущий sheet */
+    var aComment=TArray();
+    var aTable; /* Массив таблиц (sheet) используется если более одного листа   */ 
+    var aSheetName;  /* Массив названий таблиц (sheet), если более одного листа 31.10.2016 */ 
+    var CurrentTable=0; /* индекс текущей aVal в массиве aTable */
+    var CurrentRow=0; /* текущий столбец */
+    var CurrentCol=0; /* текущая колонка */
+    var MaxCol=0;     /* максимальная колонка */
+    var aColMaxLen=TArray(); /* массив в котором будут храниться максимальные длины колонок */
+    var aColLenLim;          /* массив в котором будут храниться максимально возможные длины колонок */
+    var aColRealWidth=TArray();/* массив в котором будут храниться реальные ширины колонок */
+    var SqeezeCol:Bool=true;   /* сжимать колонки */
+    var aRowMaxHeight=TArray();/* массив в котором будут храниться максимальные высоты столбцов */
+
+        /*     ┌──┬─┐
+               ├──┼─┤
+               │  │ │
+               └──┴─┘        */
+
+    /* по умолчанию таблица с одинарным бордером */
+    var strTable_Top          ="─";
+    var strTable_TopCross     ="┬";
+    var strTable_Bottom       ="─";
+    var strTable_BottomCross  ="┴";
+    var strTable_LeftTop      ="┌";
+    var strTable_LeftBottom   ="└";
+    var strTable_Left         ="│";
+    var strTable_LeftCross    ="├";
+    var strTable_RightTop     ="┐";
+    var strTable_RightBottom  ="┘";
+    var strTable_Right        ="│";
+    var strTable_RightCross   ="┤";
+    var strTable_MidCross     ="┼";
+    var strTable_MidVLine     ="│";
+    var strTable_MidHLine     ="─";
+    var Table_HLine=true; /* будет ли печататься линия между строк */
+    //var ColumnHead;       /* Может содержать ссылку на массив с названиями колонок */
+    var aColumnHead=TArray();      /* Массив массивов с названиями колонок, индексом будет CurrentTable */
+    var aSheetAutoFilter=TArray(); /* Массив логических значений, true-выводить для данного sheet автофильтр */
+    var ColumnShift=0;    /* Сдвиг нумерации по вертикали */ 
+    var HasColumnHead=false;
+    var RowShift=0;       /* Сдвиг нумерации по горизонтали */ 
+    var Prepared:bool=false;
+    var SheetPrepared:bool=false; /* флаг подготовки текущего листа */
+                                  /* лист не готовится при AddSheet, подготовка происходит при первом выводе в него */
+                                  /* настройка листа установкой свойств и вызовом методов должна произойти между AddSheet и первым выводом */
+    var strLocaleDigDelim=GetLocaleInfo (0, LOCALE_SDECIMAL, false);/* разделитель денег */        
+                                                              /* берём со стороны терминала */
+                                                              
+    var strLocaleDate=GetLocaleInfo (0, LOCALE_SDATE, false);/* разделитель денег берём со стороны терминала */
+    var strFldDelim="\t";      /* Разделитель полей в таб-формате */
+    var RowNum:Bool=false;     /* Выводить столбец с нумерацией строк */
+    var WriteBack:Bool=false;  /* Отложенная запись                   */
+    var xlCell_Comment_Shape_Width:integer=500; /* ширина примечания в Экселе */
+    var Writed:bool=false;     /* Файл записан */
+    var strDialogName:String="XCREPORT"; /* Название диалога. Используется для записи в реестр выбора типа таблицы по умолчанию */
+    var strReportName:String=strDialogName;
+    var strDelayedSheetName;   /* отложенное название листа */
+    var strTxtDir:String=GetSysDir(0);
+    var strXmlHeader    ="<?xml version='1.0' encoding='UTF-8'?>";
+    var strXmlODFRootTag="<office:document-content xmlns:office=\"urn:oasis:names:tc:opendocument:xmlns:office:1.0\" xmlns:style=\"urn:oasis:names:tc:opendocument:xmlns:style:1.0\" xmlns:text=\"urn:oasis:names:tc:opendocument:xmlns:text:1.0\" xmlns:table=\"urn:oasis:names:tc:opendocument:xmlns:table:1.0\" xmlns:draw=\"urn:oasis:names:tc:opendocument:xmlns:drawing:1.0\" xmlns:fo=\"urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" xmlns:dc=\"http://purl.org/dc/elements/1.1/\" xmlns:meta=\"urn:oasis:names:tc:opendocument:xmlns:meta:1.0\" xmlns:number=\"urn:oasis:names:tc:opendocument:xmlns:datastyle:1.0\" xmlns:presentation=\"urn:oasis:names:tc:opendocument:xmlns:presentation:1.0\" xmlns:svg=\"urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0\" xmlns:chart=\"urn:oasis:names:tc:opendocument:xmlns:chart:1.0\" xmlns:dr3d=\"urn:oasis:names:tc:opendocument:xmlns:dr3d:1.0\" xmlns:math=\"http://www.w3.org/1998/Math/MathML\" xmlns:form=\"urn:oasis:names:tc:opendocument:xmlns:form:1.0\" xmlns:script=\"urn:oasis:names:tc:opendocument:xmlns:script:1.0\" xmlns:ooo=\"http://openoffice.org/2004/office\" xmlns:ooow=\"http://openoffice.org/2004/writer\" xmlns:oooc=\"http://openoffice.org/2004/calc\" xmlns:dom=\"http://www.w3.org/2001/xml-events\" xmlns:xforms=\"http://www.w3.org/2002/xforms\" xmlns:xsd=\"http://www.w3.org/2001/XMLSchema\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xmlns:rpt=\"http://openoffice.org/2005/report\" xmlns:of=\"urn:oasis:names:tc:opendocument:xmlns:of:1.2\" xmlns:xhtml=\"http://www.w3.org/1999/xhtml\" xmlns:grddl=\"http://www.w3.org/2003/g/data-view#\" xmlns:tableooo=\"http://openoffice.org/2009/table\" xmlns:field=\"urn:openoffice:names:experimental:ooo-ms-interop:xmlns:field:1.0\" office:version=\"1.2\" grddl:transformation=\"http://docs.oasis-open.org/office/1.2/xslt/odf2rdf.xsl\">";
+    var strRepFileName;
+    var strTxtRepPath;
+    var iStrCounter=0;
+    var bSilent:Bool=false; /* false - показывать MsgBox */
+    var bNotRun:Bool=false; /* true  - не запускать программу на терминале           */
+    var DestFolder;         /* переопределить папку, куда скопируется итоговый отчёт, по умолчанию не определено */
+    private var strBaseName:String; /* используется при выводе ods, xlsx. локальное имя папки для формирования элементов архива внутри TXTFILE */
+    var aApplication=TArray();      /* программы для открытия результирующего файла отчёта */
+    var aHyperLink  =TArray();
+
+    /*
+    macro HasMethod(sMethodName)
+        var s;
+        var a=GetObjMethods(this);
+        sMethodName=StrUpr(sMethodName);
+        for(s,a)
+            if (StrUpr(s)==sMethodName)
+                return true;
+            end;
+        end;
+        return false;
+    end;
+    */
+
+
+    macro InitTxtRep
+        var strDir, ErrCode;
+
+        if ((ValType(strTxtRepPath)==V_Undef) or (strTxtRepPath==""))
+            if ((ValType(strRepFileName)==V_Undef) or (strRepFileName==""))
+                strRepFileName=ModuleName()+String(UserNumber());//+".txt";
+            end;
+
+            GetRegistryValue ("BANK_INI\\ОБЩИЕ ПАРАМЕТРЫ\\ДИРЕКТОРИИ\\TEXTDIR",V_STRING, strDir, ErrCode);
+            if (SubStr(strDir,StrLen(strDir))!="\\") strDir=strDir+"\\"; end;
+            strTxtRepPath=strDir+strRepFileName+".txt";
+        end;
+
+        
+    end; /* macro InitTxtRep */
+
+
+    /* Вывод в текст дорлжен идти через эту процедуру */
+    macro PrintToText(s)
+        var OutStreamSave;
+        if (0==iStrCounter)
+            InitTxtRep();
+            OutStreamSave=SetOutput(strTxtRepPath,false);
+        else
+            OutStreamSave=SetOutput(strTxtRepPath,true);
+        end;
+
+        Print(s);
+        SetOutput(OutStreamSave,true);
+        iStrCounter=iStrCounter+1;
+    end; /* macro PrintToText */
+
+    macro PrintToTextLn(s)
+        PrintToText(s+"\n");
+    end; /* macro PrintToTextLn(s) */
+
+    macro FormatString(v,iLen)
+        var s:String;
+        var iSLen:Integer;
+
+        if ((ValType(v)==V_MONEY) or (ValType(v)==V_MONEYL))
+            s=String(v);
+            if (strLocaleDigDelim!=".")
+                StrSet (s, StrLen(v)-2, strLocaleDigDelim);
+            end;
+        elif (ValType(v)==V_UNDEF)
+            s="";
+        else
+            s=String(v); /* нужно что-то помудрёнее */
+        end;
+        iSLen=StrLen(s);
+        if (ValType(iLen)!=V_UNDEF)
+            if   (iSLen>iLen)
+                /* Строка длинее чем надо */
+            elif (iSLen<iLen)
+                /* Строка короче чем надо */
+                if (ValType(v)==V_STRING)
+                    s=s+StrRepeat("<",iLen-iSLen);
+                else
+                    s=StrRepeat(">",iLen-iSLen)+s;
+                end;
+            end;
+        end;
+        return s;
+
+    end; /* macro FormatString */
+
+    /* расчет таблицы реальной ширины колонок */
+    macro ColRealWidthRecalc
+        var iCol:Integer=0;
+        var iColWidth:Integer;
+
+        while (iCol<(MaxCol+1))
+            //iColWidth=0;
+            
+            /* определение ширины текущей колонки */
+            if (ValType(aColLenLim)!=V_UNDEF)
+                if(ValType(aColLenLim)==V_INTEGER)
+                    iColWidth=aColLenLim;
+                else
+                    iColWidth=aColLenLim[iCol];
+                end;
+            else
+                iColWidth=NZ(aColMaxLen[iCol],0);
+            end;
+
+            if (SqeezeCol)
+                if (NZ(aColMaxLen[iCol],0)<NZ(iColWidth,0))
+                    iColWidth=NZ(aColMaxLen[iCol],0);
+                end;
+            end;
+            aColRealWidth[iCol]=iColWidth;
+            iCol=iCol+1;
+        end;
+    end;
+
+        /*     ╔══╤═╤╦╦╗
+               ╠══╪═╪╬╬╣
+               ╟──┼─┼╫╫╢
+               ║  │ │║║║
+               ╚══╧═╧╩╩╝     */
+    /* Инициализация для таблицы c двойным бордером */
+    macro InitTableDoubleLine
+        strTable_Top          ="═";
+        strTable_TopCross     ="╦";
+        strTable_Bottom       ="═";
+        strTable_BottomCross  ="╩";
+        strTable_LeftTop      ="╔";
+        strTable_LeftBottom   ="╚";
+        strTable_Left         ="║";
+        strTable_LeftCross    ="╠";
+        strTable_RightTop     ="╗";
+        strTable_RightBottom  ="╝";
+        strTable_Right        ="║";
+        strTable_RightCross   ="╣";
+        strTable_MidCross     ="╬";
+        strTable_MidVLine     ="║";
+        strTable_MidHLine     ="═";
+    end; /* macro InitTableDoubleLine */
+
+    /* Инициализация для таблицы без бордеров */
+    macro InitTableEmptyLine
+        strTable_Top          ="";
+        strTable_TopCross     ="";
+        strTable_Bottom       ="";
+        strTable_BottomCross  ="";
+        strTable_LeftTop      ="";
+        strTable_LeftBottom   ="";
+        strTable_Left         ="";
+        strTable_LeftCross    ="";
+        strTable_RightTop     ="";
+        strTable_RightBottom  ="";
+        strTable_Right        ="";
+        strTable_RightCross   ="";
+        strTable_MidCross     ="";
+        strTable_MidVLine     =" ";
+        strTable_MidHLine     ="";
+        Table_HLine=false;
+    end; /* macro InitTableEmptyLine */
+
+    //Получить количество строк в таблице по номеру. Актуально для вывода многошита
+    macro GetNRow(iTable)
+        if(ValType(iTable)==V_UNDEF)
+            return aVal.Size;
+        end;
+
+        if((ValType(aTable)==V_GENOBJ) and IsEqClass("TArray", aTable) and (iTable<aTable.Size))
+            if((ValType(aTable[iTable])==V_GENOBJ) and IsEqClass("TArray", aTable[iTable])) 
+                return aTable[iTable].Size;
+            else
+                return 0;
+            end;
+        end;
+
+        return aVal.Size;
+    end; //macro GetNRow
+
+    //Переводит номер колонки в буквенное представление на манер 1->A, 2->B, 3->C
+    macro GetColumnAName(i)
+        var s="";
+        var r; //остаток от деления нацело
+        const q=26; //основание новой системы счисления
+
+        macro add(c)
+                s=s+StrFor(CodeFor("A")+c);
+        end;
+
+        var first=true;
+        while((i>0) or first)  //чтобы 0->A работало
+            first=false;
+            r=mod(i,q);
+            add(r);
+            i=(i-r)/q;
+        end;
+        return s;
+    end; //macro GetColumnAName
+
+    macro DumpColMaxLen
+        var iCol=0;
+        while (iCol<aColMaxLen.Size())
+            PrintLn("Ширина колонки ",iCol," - ", aColMaxLen[iCol]);
+            iCol=iCol+1;
+        end;
+        PrintLn("---");
+        PrintLn(aColMaxLen.Size());
+    end;
+
+    macro DumpRowMaxHeight
+        var iRow=0;
+        while (iRow<aVal.Size())
+            PrintLn("Высота столбца ",iRow," - ", aRowMaxHeight[iRow]);
+            iRow=iRow+1;
+        end;
+        PrintLn("---");
+        PrintLn(aRowMaxHeight.Size());
+    end;
+
+    macro AddRow()
+       if (ValType(CurrentRow)==V_UNDEF)
+           CurrentRow=0;
+       else
+           CurrentRow=CurrentRow+1;
+       end;
+       CurrentCol=0;
+    end;
+
+    /* установить имя отчёта */
+    macro SetReportName(param)
+        if ((ValType(param)==V_STRING) and (param!=""))
+            strReportName=param;
+        end;
+    end;
+
+
+    /* собственно вывод. не рекомендуется для использования снаружи */
+    macro DirectWriteToCellExcel(iRow, iColumn, v, comment)
+        var xlCell;
+
+        xlCell= oSheet.cells(iRow+1, iColumn+1);
+          if(ValType(v)==V_STRING)
+            xlCell.NumberFormat="@";
+            xlCell.Value=v;
+        elif((ValType(v)==V_MONEYL) or (ValType(v)==V_MONEY))
+            xlCell.ColumnWidth=16;
+            if (Version()>=1120)
+                /* RS 5.5 */
+                xlCell.Value=v;
+            else
+                /* !!! Антон А. Бурцев: Деньги не присваиваются с RSScript от 14.01.02
+                            поэтому через дабл пока... */
+                xlCell.Value=Double(v)/100.0;
+            end;
+            xlCell.NumberFormat = "# ##0"+strLocaleDigDelim+"00";
+        elif(ValType(v)==V_DATE)
+            /* формат указывается вместе с языком, иначе проблемы на русских-аглицких версиях */
+            xlCell.NumberFormat = "[$-419]ДД.ММ.ГГГГ;@";
+            if (v==Date(0,0,0))
+            else
+                xlCell.Value=v;
+            end;
+        else
+            xlCell.Value=v;
+        end;                   
+        if ( (not (ValType(Comment)==V_UNDEF)) and ( not (Comment=="")))
+            xlCell.AddComment;
+            xlCell.Comment.Text(comment);
+            xlCell.Comment.Shape.Width=xlCell_Comment_Shape_Width;
+        end;
+    end; /* DirectWriteToCellExcel */
+
+    macro DirectWriteToCellOpenOfficeCalc(iRow, iColumn, v, comment)
+        var ooCell;
+
+        macro GetStrDate()
+            var d;
+            var m;
+            var y;
+
+            if (v==Date(0,0,0))
+                return "";
+            else
+                datesplit(v,d,m,y);
+                return "=DATE("+y+";"+m+";"+d+")";
+            end;
+        end; /* macro GetStrDate */
+
+        macro AddAnnotation
+            var oAnnotations;
+            var CellAddress;
+            var oAnnotation;
+            var oSize;
+
+            oAnnotations= oSheet.getAnnotations() ;
+            CellAddress =ooCell.getCellAddress;
+            oAnnotations.insertNew(CellAddress,comment);
+
+            oAnnotation=ooCell.getAnnotation;
+        end; /* macro AddAnnotation */
+
+        ooCell = oSheet.getCellByPosition(iColumn, iRow);
+          if(ValType(v)==V_STRING)
+            ooCell.SetString(v);
+        elif((ValType(v)==V_MONEYL) or (ValType(v)==V_MONEY))
+            if (Version()>=1120)
+                /* RS 5.5 */
+                ooCell.setValue(v);
+            else
+                /* !!! Антон А. Бурцев: Деньги не присваиваются с RSScript от 14.01.02
+                            поэтому через дабл пока... */
+                ooCell.setValue(Double(v)/100.0);
+            end;
+            ooCell.NumberFormat=4;
+        elif(ValType(v)==V_DATE)
+            ooCell.SetFormula(GetStrDate());
+        else
+            ooCell.setValue(v);
+        end;                   
+        if ( (not (ValType(Comment)==V_UNDEF)) and ( not (Comment=="")))
+            /* Комментарий */
+            AddAnnotation();
+        end;
+    end; /* DirectWriteToCellOpenOfficeCalc */
+
+    macro WriteToCell(iRow, iColumn, v, comment, hyperlink)
+        var iRowAbs=iRow;
+        var iColumnAbs=iColumn;
+
+
+        macro CalcStat(iRowStat,iColStat)
+            var iStrLen; /* кол-во знаков в строке. temp */
+            var s=FormatString(aVal(iRowStat,iColStat));
+            var aSubStr;
+            var iMaxWidth:Integer=0;
+            var iHeight:Integer=0;
+
+            macro DebugDumpSubStr
+                var i=0;
+
+                while(i<aSubStr.Size())
+                    PrintLn(String(i)+": "+aSubStr[i]);
+                    i=i+1;
+                end;
+            end;
+
+
+            /* следим за актуальностью таблицы максимальной ширины колонок */
+            if (ValType(aColMaxLen[iColStat])==V_UNDEF) aColMaxLen[iColStat]=0; end;
+            
+            iStrLen=StrLen(s);
+            if (iStrLen>aColMaxLen[iColStat]) aColMaxLen[iColStat]=iStrLen; end;
+            /* следим за актуальностью максимальной колоноки */
+            if (iColStat>MaxCol) MaxCol=iColStat; end;
+
+            if (ValType(aColLenLim)!=V_UNDEF)
+                if(ValType(aColLenLim)==V_INTEGER)
+                    iMaxWidth=aColLenLim;
+                else
+                    iMaxWidth=aColLenLim[iRowStat];
+                end;
+                if (NZ(iMaxWidth,0)>0)
+                    if (iStrLen<=iMaxWidth)
+                        iHeight=1;
+                    else
+                        aSubStr=StrSplit2 ( s, iMaxWidth);
+                        //DebugDumpSubStr;
+                        iHeight=aSubStr.Size();
+                    end;
+                    if   (ValType(aRowMaxHeight[iRowStat])==V_UNDEF)
+                        aRowMaxHeight[iRowStat]=iHeight;
+                    elif (iHeight>aRowMaxHeight[iRowStat])
+                        aRowMaxHeight[iRowStat]=iHeight;
+                    end;
+                end;
+                
+            end;
+        end; /* CalcStat */
+
+        /* entry point */
+        
+        if (not Prepared)  
+            GenRun(this,"Prepare"); /* Ну... здесь такая фигня, потому что  Prepare ниже */
+        end;
+
+        if (not SheetPrepared)  
+            GenRun(this,"PrepareSheet"); 
+        end;
+
+        iRow=NZ(iRow,CurrentRow);
+        if (ValType(iColumn)==V_UNDEF)
+            CurrentCol=NZ(CurrentCol,0);
+            iColumn=CurrentCol;
+            CurrentCol=CurrentCol+1;
+        end;
+
+        iRow   = iRow   +RowShift;
+        iColumn= iColumn+ColumnShift;
+        if(ValType(v)==V_UNDEF) return false; end;
+
+        /* Массив будем сохранять для всех */
+        if(true)
+         /*if((DestType==XCR_dest_ttt) or (DestType==XCR_dest_tab))*/
+             if(valtype(aVal[iRow])==V_UNDEF)
+                 aVal[iRow]=TArray();
+             end;
+             aVal[iRow][iColumn]=v;
+             if ( (not (ValType(Comment)==V_UNDEF)) and ( not (Comment=="")))
+                 if(valtype(aComment[iRow])==V_UNDEF)
+                     aComment[iRow]=TArray();
+                 end;
+                 aComment[iRow][iColumn]=Comment;
+             end;
+             if ( (ValType(hyperlink)!=V_UNDEF) and (hyperlink!=""))
+                 if(valtype(aHyperLink[iRow])==V_UNDEF)
+                     aHyperLink[iRow]=TArray();
+                 end;
+                 aHyperLink[iRow][iColumn]=HyperLink;
+             end;
+
+             CalcStat(iRow,iColumn);
+
+        end;
+        if (DestType==XCR_dest_xls)
+             /* excel */
+             if (not WriteBack)
+                 DirectWriteToCellExcel(iRow, iColumn, v, comment);
+             end;
+        elif(DestType==XCR_dest_ods)
+             if (not WriteBack)
+                 DirectWriteToCellOpenOfficeCalc(iRow, iColumn, v, comment);
+             end;
+        end;
+        /* нумерация */
+        if (RowNum and (iRow>=RowShift))
+            /* Проверка эта строка первый раз - не первый раз */
+            if (ValType(aVal[iRow][ColumnShift-1])==V_UNDEF)
+                aVal[iRow][ColumnShift-1]=iRow+1-RowShift;
+                CalcStat(iRow,ColumnShift-1);
+                /* Для тех кто не пишет сперва в массив выводим сразу  */
+                /* предварительный вывод в массив защищает от рекурсии */
+                if ((DestType==XCR_dest_xls) or (DestType==XCR_dest_ods))
+                    WriteToCell(iRowAbs, ColumnShift-2, iRowAbs+1);
+                end;
+            end;
+        end;
+
+
+    end; /* macro WriteToCell */
+
+    /* принимает список аргументов, формируя из них строку таблицы */
+    macro WriteRow(param)
+        var i:integer;
+        var v;
+
+        //если передан единственный аргумент и это массив, то считаем, что этот массив значений строки
+        if ((2==Parmcount()) and (ValType(param) == V_GENOBJ)) 
+            if (IsEqClass("TArray", param))
+                for (v,param)
+                    WriteToCell(null,null,v);
+                end;
+            else
+                //11.01.2018 Может быть передан объект не массив, 
+                // в этом случае строка формируется из свойств объекта
+                // var propNames=GetObjProps(param,true);
+                for(i,0,GenNumProps(param)-1,1)
+                    WriteToCell(null,null,param[i]);
+                end;
+            end;
+        else
+            for (i, 0, Parmcount()-2,1)
+                GetParm(i+1,v);
+                WriteToCell(null,null,v);
+            end;
+        end;
+
+        AddRow();
+    end; /* macro WriteRow */
+
+
+    /* Установить название листа для эл.таб */
+    macro SetSheetName(strParamSheetName:String)
+        if (ValType(aSheetName)==V_GENOBJ) 
+            return aSheetName[CurrentTable]=strParamSheetName;
+        else
+            if (Prepared)
+                if (DestType==XCR_dest_xls)
+                    oSheet.Name=strParamSheetName;
+                end;
+                if (DestType==XCR_dest_ods)
+                    oSheet.setName(strParamSheetName);
+                end;
+            else
+                strDelayedSheetName=strParamSheetName;
+            end;
+        end;
+    end; /* macro SetSheetName */
+
+
+
+    macro PrepareOpenOffice()
+        var oOOo;
+        var oDesktop;
+        var oDocument;
+        var oSheets;
+        var oController;
+
+        var mArg=TArray;
+
+        mArg.MarshalByVal=true;
+
+        ob = CreateObject ("rsax","TRsAxServer","RsAxServer",false);
+        oOOo = ob.CreateComObject("com.sun.star.ServiceManager");
+        oDesktop = oOOo.createInstance("com.sun.star.frame.Desktop");
+        oDocument = oDesktop.LoadComponentFromURL("private:factory/scalc","_blank",0,mArg);
+        oSheets = oDocument.GetSheets();
+        oSheet = oSheets.getByIndex(0);
+
+        oController = oDocument.getCurrentController;   
+        if((ValType(HasColumnHead)==V_BOOL) and (HasColumnHead))
+            oController.freezeAtPosition(ColumnShift, RowShift) ;
+        end;
+
+    end; /* macro PrepareOpenOffice */
+
+    macro PrepareExcel()
+        
+        ob = CreateObject ("rsax","TRsAxServer","RsAxServer",false);
+        Excel = ob.CreateComObject ("Excel.Application", false);
+
+        Excel.Visible = True;
+
+        Excel.Workbooks.Add;
+        oSheet=Excel.Sheets(1);
+
+        if((ValType(HasColumnHead)==V_BOOL) and (HasColumnHead))
+            oSheet.Rows(RowShift).Font.Bold = -1;
+            oSheet.Cells(RowShift+1,ColumnShift+1).Select;
+            Excel.ActiveWindow.FreezePanes = True;
+        end;
+
+    end; /* PrepareExcel */
+
+    macro PrepareNull()
+    end; /* PrepareNull */
+
+    macro PrepareTextTable()
+    end; /* PrepareTextTable */
+
+    macro PrepareHtml()
+    end; /* PrepareHtml */
+
+    macro PrepareXML()
+    end; /* PrepareXML */
+
+    macro PrepareTxt()
+    end; /* PrepareTxt */
+
+    macro PrepareTab()
+    end; /* PrepareTab */
+
+    macro PrepareWikiTable()
+    end; /* PrepareWikiTable */
+
+    macro PrepareOpenDocumentSpreadsheet()
+    end; /* PrepareOpenDocumentSpreadsheet */
+
+    macro SetDest(inDestType)
+        DestType=inDestType;
+    end;
+
+    /* "печать" строки-заголовка                      */
+    /* iSheet номер листа(таблицы) индекс aTable, с 0 */
+    macro WriteHead(iSheet)
+        var iCol=0;
+
+        if((ValType(aColumnHead[iSheet])==V_GENOBJ) and IsEqClass("TArray", aColumnHead[iSheet]))
+        //if((ValType(HasColumnHead)==V_BOOL) and (HasColumnHead))
+            for(iCol, 0, aColumnHead[iSheet].Size()-1)
+                WriteToCell(-1, iCol, aColumnHead[iSheet][iCol]);
+            end;
+        end;
+    end; /* WriteHead */
+
+    macro SetDestMenu(strNewDialogName)
+        var iDef;
+        var ErrCode;
+
+        if ((valtype(strNewDialogName)!=V_UNDEF) and (Trim(strNewDialogName)!=""))
+            strDialogName=strNewDialogName;
+        end;
+
+        var strRegPath="USER_MAC\\ДИАЛОГИ\\"+strDialogName+"\\IDESTTYPE";
+
+        /* По умолчанию.  */
+        GetRegistryValue (strRegPath,V_INTEGER, iDef, ErrCode);
+        DestType=menu(aDestTypeText,"Вывод отчёта в ...",null,null,null,iDef);
+        SetRegistryValue(strRegPath,V_INTEGER, DestType, ErrCode);
+        if (ErrCode==7) msgbox ("Please, add " + strRegPath + " to the regisry"); end;
+
+        return  DestType;
+    end;
+
+    // for old RSL
+    private macro ProxyGetObjProps(param1,param2)
+        return ExecMacro2("GetObjProps", param1 ,param2);
+    end;
+
+    /* Принимает на вход произольное количество строк и делает из них массив колонок */
+    macro SetArrayHead()
+        var i:integer;
+        var param;
+
+        GetParm(1, param);
+
+        //11.01.2018 Может быть передан объект массив или объект со свойствами 
+        if ((2==Parmcount()) and (ValType(param) == V_GENOBJ)) 
+            if (IsEqClass("TArray", param))
+                aColumnHead[CurrentTable]=TArray(param.Size);
+                for (i,0,param.Size-1,1)
+                    aColumnHead[CurrentTable][i]=param[i];
+                end;
+            else
+                aColumnHead[CurrentTable]=ProxyGetObjProps(param,true);
+            end;
+        else
+            //ColumnHead=TArray(Parmcount()-1); /* В методе первый параметр Класс */
+            aColumnHead[CurrentTable]=TArray(Parmcount()-1); /* В методе первый параметр Класс */
+
+            for (i, 0, Parmcount()-2,1)
+                GetParm(i+1, aColumnHead[CurrentTable][i]);
+            end;
+        end;
+
+    end; /* macro SetArrayHead */
+
+    //Добавляет один заголовок к существующей строке заголовков
+    macro HeadAddColumn(ColumnName)
+        aColumnHead[CurrentTable][aColumnHead[CurrentTable].Size]=ColumnName;
+    end; //macro HeadAddColumn
+
+    macro SetAutoFilter()
+        aSheetAutoFilter[CurrentTable]=true;
+    end; //macro SetAutoFilter
+
+    Macro PrepareCommon
+        /* */
+        /* */
+        /* автоматический запрос формата вывода */
+        if ((valtype(DestType)!=V_INTEGER) or (DestType<0) or (DestType>=aDestTypeText.Size()))
+            SetDestMenu();
+        end;
+        if ((valtype(DestType)!=V_INTEGER) or (DestType<0) or (DestType>=aDestTypeText.Size()))
+            exit(0,"Попытка использовать объект с неверным выводом ["+String(DestType)+"]");
+        end;
+        strDestType=aDestTypeText[DestType];
+
+
+        if (RowNum)
+            ColumnShift=ColumnShift+1;
+        end;
+    end; /* Macro PrepareCommon */
+
+    /* Подготовка таблицы, вызывается из WriteToCell */
+    macro PrepareSheet()
+        if (ValType(aColumnHead[CurrentTable])!=V_UNDEF)
+            HasColumnHead = true;
+            RowShift      = RowShift+1;
+        else
+            HasColumnHead = false;
+            //RowShift=RowShift+1;
+        end;
+        SheetPrepared=true; /* до WriteHead, иначе можем уйти в рекурсию */
+        WriteHead(CurrentTable);
+        if ((valtype(strDelayedSheetName)!=V_UNDEF) and (strDelayedSheetName!=""))
+            SetSheetName(strDelayedSheetName);
+        end;
+    end; //macro PrepareSheet
+
+
+
+    Macro Prepare
+        if (Prepared) return; end;
+        PrepareCommon();
+        var strMethod="Prepare"+strDestType;
+        var refMethod=R2M(this,strMethod);
+        if (ValType(refMethod)==V_R2M)
+            ExecMacro2(refMethod);
+        end;
+        /* Избавляемся от HasMethod
+        if (HasMethod(strMethod))
+            ExecMacro2(R2M(this,strMethod));
+        else
+            //MsgBox(strMethod + " not found");
+        end;
+        */
+        Prepared=true; /* до WriteHead, иначе можем уйти в рекурсию */
+    end; /* Macro Prepare */
+
+    macro Constructor()
+
+        aDestTypeText[0]="Null";
+        aDestTypeText[1]="txt";
+        aDestTypeText[2]="Tab";
+        aDestTypeText[3]="OpenOffice";
+        aDestTypeText[4]="Excel";
+        aDestTypeText[5]="Html";
+        aDestTypeText[6]="Xml";
+        aDestTypeText[7]="TextTable";
+        aDestTypeText[8]="WikiTable";
+        aDestTypeText[XCR_dest_odfs]="OpenDocumentSpreadsheet";
+        aDestTypeText[XCR_dest_xlsx]="Xlsx";
+
+
+        aApplication[XCR_dest_odfs]="scalc.exe";
+        aApplication[XCR_dest_xlsx]="excel.exe";
+
+        /*
+
+        XCR_dest_nul==DestType,
+        XCR_dest_txt=1,
+        XCR_dest_tab=2,
+        XCR_dest_ods=3,
+        XCR_dest_xls=4,
+        XCR_dest_htm=5,
+        XCR_dest_xml=6,
+        XCR_dest_ttt=7;
+        if
+        */
+        if (Trim(strTxtDir)=="")
+            strTxtDir="..\\txtfile";
+        end;
+
+        if (SubStr(strTxtDir,StrLen(strTxtDir),1)=="\\")
+            strTxtDir=substr(strTxtDir,1,StrLen(strTxtDir)-1);
+        end;
+
+    end; /* macro Constructor */
+
+    Macro TestNull
+        msgbox("TestNull");
+    end;
+
+
+    Macro Test
+        ExecMacro2(R2M(this,"Test"+strDestType));
+    end; /* Macro Test */
+
+    /********************************/
+    macro AddSheetHtml()
+    end;
+ 
+    macro AddSheetOpenDocumentSpreadsheet()
+    end;
+
+    /*macro AddSheet()
+    end;
+    macro AddSheet()
+    end;*/
+
+
+    /* Экспериментальная функция. Мультитабличность */
+    macro AddSheet()
+
+        macro CopyArray
+            var iTable=aTable.Size();
+            aTable[iTable]=TArray(aVal.Size);
+            var r,c, iCopyRow, iCopyCell;
+            for (r, aVal)
+                iCopyRow=aTable[iTable].Size;
+                aTable[iTable][iCopyRow]=TArray();
+                for (c, r)
+                    iCopyCell=aTable[iTable][iCopyRow].Size();
+                    aTable[iTable][iCopyRow][iCopyCell]=c;
+                end;
+            end;
+        end;
+
+        if (valtype(aTable)==V_UNDEF)
+            aTable=TArray();
+        else
+        end;
+        //aVal переносится новым слоем в aTable и очищается
+        CopyArray();
+        aVal.Size=0;
+        CurrentTable=aTable.Size;
+        RowShift=0;
+        CurrentRow=0; /* текущий столбец */
+        CurrentCol=0; /* текущая колонка */
+        SheetPrepared=false; /* сбросить флаг подготовки таблицы */
+
+       // DebugBreak();
+        //сохраняем в массиве имя листа
+        if((valtype(strDelayedSheetName)!=V_UNDEF) and (strDelayedSheetName!="")) 
+            if (valtype(aSheetName)==V_UNDEF)
+                aSheetName=TArray();
+            end;
+            aSheetName[CurrentTable-1]=strDelayedSheetName;
+            strDelayedSheetName=null;
+        end;
+
+        var strMethod="AddSheet"+strDestType;
+
+        var refMethod=R2M(this,strMethod);
+        if (ValType(refMethod)==V_R2M)
+            ExecMacro2(refMethod);
+        end;
+        //
+        //if (HasMethod(strMethod))
+        //    GenRun(this, strMethod);
+        //end;
+        
+    end; /* AddSheet */
+
+
+    /********************************/
+    macro WriteFileHtml()
+        var iCol=0;
+        var iRow=0;
+        var iNCol=0; /* Кол-во колонок в текущей строке */
+        var NCol=0;  /* Максимальное кол-во колонок */
+        var NRow=aVal.Size();
+        var tsFile;
+
+        macro  PrintTD
+            var v=aVal[iRow][iCol];
+            var td;
+            var strTDAttr="";
+
+            if   (ValType(v)==V_STRING)
+                td=html(v);
+            elif (ValType(v)==V_INTEGER)
+                td=String(v);
+                strTDAttr="ALIGN=RIGHT SDVAL=\""+td+"\" SDNUM=\"1049;\"";
+            elif (ValType(v)==V_MONEY)
+                td=String(v);
+            elif (ValType(v)==V_DATE)
+                if (Date(0,0,0)==v)
+                    td="";
+                else
+                    strTDAttr="ALIGN=RIGHT SDVAL=\""+String(v-Date(30,12,1899))+"\" SDNUM=\"1049;0;DD.MM.YYYY\"";
+                    td=String(v);
+                end;
+            elif (ValType(v)==V_UNDEF)
+                td="";
+            else
+                td=html(String(v));
+            end;
+
+            tsFile.WriteLine("<TD "+strTDAttr+">"+td+"</TD>");
+        end; /* macro  PrintTD */
+
+
+        var strFileName="..\\TXTFILE\\"+GetApplicationKey()+".html";
+
+        // на стром RSL нет TStreamDoc, пусть хотябы комрилится, а потом трапается 
+        //tsFile=TStreamDoc(strFileName, "C","utf8"); /* rsoem */
+        tsFile=GenObject("TStreamDoc", strFileName, "C", "utf8"); /* rsoem */ 
+        
+        tsFile.WriteLine("<HTML>");
+        tsFile.WriteLine("<HEAD>");
+        tsFile.WriteLine("<META HTTP-EQUIV=\"CONTENT-TYPE\" CONTENT=\"text/html; charset=utf8\">"); /* cp866*/
+        tsFile.WriteLine("</HEAD>");
+
+        
+        tsFile.WriteLine("<BODY TEXT=\"#000000\">");
+        tsFile.WriteLine("<TABLE>");
+        /* Собственно цикл вывода */
+        iRow=0;
+        while (iRow<NRow)
+            if(ValType(aVal[iRow])==V_UNDEF)
+                tsFile.WriteLine("<!-- (empty string) -->");
+            else
+                iCol=0;
+                tsFile.WriteLine(" <TR>");
+                while (iCol<aVal[iRow].Size())
+                    PrintTD();
+                    iCol=iCol+1;
+                end;
+                tsFile.WriteLine(" </TR>");
+            end;
+            iRow=iRow+1;
+        end;
+        tsFile.WriteLine("</TABLE>");
+        tsFile.WriteLine("</BODY>");
+        tsFile.WriteLine("</HTML>");
+        tsFile=null;
+
+  
+        var strNewFileName;
+        if (not IsStandAlone)
+            strNewFileName="$"+strReportName+".html";
+            if((valtype(strDelayedSheetName)!=V_UNDEF) and (strDelayedSheetName!="")) 
+                strNewFileName="$"+strDelayedSheetName+".html";
+            end;
+
+            if (not CopyFile (strFileName, strNewFileName, true ))
+                MsgBox("Ошибка переноса файла на терминал|"+strFileName+"->"+strNewFileName);
+            else
+                RemoveFile(strFileName);
+            end;
+            //StartProg (strNewFileName);
+            //StartProg ("start",SubStr(strNewFileName,2));
+            //StartProg (SubStr(strNewFileName,2));
+            StartProg ("$cmd","/c start e:\\users\\rsb_txt\\"+SubStr(strNewFileName,2));
+        else
+            MsgBox("Двухзвенка детектед");
+            
+        end;
+    end; /* macro WriteFileHtml */
+
+
+    macro WriteFileTab()
+        var iCol=0;
+        var iRow=0;
+        var iNCol=0; /* Кол-во колонок в текущей строке */
+        var NCol=0;  /* Максимальное кол-во колонок */
+        var NRow=aVal.Size();
+
+        /* Собственно цикл вывода */
+        iRow=0;
+        while (iRow<NRow)
+            if(ValType(aVal[iRow])==V_UNDEF)
+                PrintToText("(empty string)");
+            else
+                iCol=0;
+                while (iCol<aVal[iRow].Size())
+                    if (iCol>0)
+                        PrintToText(strFldDelim);
+                    end;
+                    //Print(NZ(aVal[iRow][iCol],"(null)"));
+                    PrintToText(FormatString(aVal[iRow][iCol]));
+                    iCol=iCol+1;
+                end;
+                PrintToText("\n");
+            end;
+            iRow=iRow+1;
+        end;
+        
+    end; /* WriteFileTab */
+
+    macro WriteFileTextTable()
+        var iCol=0;
+        var iRow=0;
+        var iNCol=0; /* Кол-во колонок в текущей строке */
+        var NCol=MaxCol+1;  /* Максимальное кол-во колонок */
+        var NRow=aVal.Size();
+        var sStrRep="";
+        var iSubRow:Integer; /* индекс строки в многострочной ячейке */
+        var NSubRow:Integer; /* количество строк в строке :)         */
+        var NCurSubRow:Integer; /* количество строк в текущей строке */
+        var iColWidth:Integer;  /* ширина колонки */
+        var s:String;
+        var aRowStr; /* массив в который складываются подстроки всех ячеек одного столбца */
+                     /* и получаются длинные горизонтальные строки                        */
+        var aSubStr; /* массив в котором хранятся подстроки текущей ячейки */
+
+        macro MakeHBorder(sLine,sLeft,sCross,sRight)
+            var iCol=0;
+            var sStrRet="";
+            
+            sStrRet=sLeft;
+            while (iCol<NCol)
+                sStrRet=sStrRet+StrRepeat(sLine, aColRealWidth[iCol]);
+
+                iCol=iCol+1;
+
+                if (iCol<NCol)
+                    sStrRet=sStrRet+sCross;
+                else
+                    sStrRet=sStrRet+sRight;
+                end;
+            end;
+            return sStrRet;
+        end; /* macro MakeHBorder*/
+
+        ColRealWidthRecalc();
+
+        /* Собственно цикл вывода */
+        iRow=0;
+        while (iRow<NRow)
+            iCol=0;
+            //sStrRep=strTable_Left;
+
+            if (iRow==0)
+                /* top */
+                PrintToTextLn(MakeHBorder(strTable_Top,strTable_LeftTop,strTable_TopCross,strTable_RightTop));
+            else
+                /* mid */
+                if (Table_HLine)
+                    PrintToTextLn(MakeHBorder(strTable_MidHLine,strTable_LeftCross,strTable_MidCross,strTable_RightCross));
+                end;
+            end;
+
+            NSubRow=NZ(aRowMaxHeight[iRow],1);
+            aRowStr=TArray(NSubRow);
+            /* инициализируем массив. заполняем его пустыми строками */
+            iSubRow=0;
+            while (iSubRow<NSubRow)
+                aRowStr[iSubRow]=strTable_Left;
+                iSubRow=iSubRow+1;
+            end; /* цикл по подстрокам */
+
+            /* цикл по колонкам */
+            while (iCol<NCol)
+                
+
+                if((ValType(aVal[iRow])==V_UNDEF) or (ValType(aVal[iRow][iCol])==V_UNDEF))
+                        aSubStr=TArray();
+                else
+                    s=NZ(FormatString(aVal[iRow][iCol]), StrRepeat(" ", iColWidth));//"▓"
+                    if((NZ(aColRealWidth[iCol],0)>0) and (StrLen(s)>aColRealWidth[iCol]))
+                        aSubStr=StrSplit2 ( s, aColRealWidth[iCol]);
+                        //iHeight=aSubStr.Size();
+                    else
+                        //iHeight=1;
+                        aSubStr=TArray(1);
+                        aSubStr[0]=s;
+                    end;
+                end;
+
+                iSubRow=0;
+                while (iSubRow<NSubRow)
+                    if (iSubRow<aSubStr.Size())
+                        aRowStr[iSubRow]=aRowStr[iSubRow]+aSubStr[iSubRow]+StrRepeat(" ", NZ(aColRealWidth[iCol],0)-StrLen(aSubStr[iSubRow]));//"░"
+                    else
+                        aRowStr[iSubRow]=aRowStr[iSubRow]+StrRepeat(" ", aColRealWidth[iCol]); //"▒"
+                    end;
+                    if (iCol<NCol)
+                        aRowStr[iSubRow]=aRowStr[iSubRow]+strTable_MidVLine;
+                    else
+                        aRowStr[iSubRow]=aRowStr[iSubRow]+strTable_Right;
+                    end;
+                    iSubRow=iSubRow+1;
+                end; /* цикл по подстрокам */
+
+                aSubStr=null;
+
+                iCol=iCol+1;
+            end; /* цикл по колонкам */
+
+            /* вывод строки таблицы */
+            iSubRow=0;
+            while (iSubRow<NSubRow)
+                PrintToTextLn(aRowStr[iSubRow]);
+                iSubRow=iSubRow+1;
+            end; /* цикл по подстрокам */
+
+            iRow=iRow+1;
+            if (iRow==NRow)
+                PrintToTextLn(MakeHBorder(strTable_Bottom,strTable_LeftBottom,strTable_BottomCross,strTable_RightBottom));
+            end;
+        end;
+    end; /* WriteFileTextTable */
+
+    macro WriteFileWikiTable()
+        [not supported yet];
+    end; /* macro WriteFileWikiTable() */
+
+    macro WriteFileTxt()
+        [not supported yet];
+    end; /* macro WriteFileWikiTable() */
+
+    macro WriteFileNull()
+    end; /* WriteFile */
+
+    macro WriteFileExcel()
+        if (WriteBack)
+        end;
+    end; /* WriteFile */
+
+    macro WriteFileOpenOffice()
+        var oClolumns;
+
+        if (WriteBack)
+        end;
+        oClolumns=oSheet.getColumns();
+        oClolumns.optimalWidth=true;
+    end; /* WriteFile */
+
+    macro WriteFileContent(strFileName, strFileContent, strEncoding)
+        var tsFile;
+        if (ValType(strEncoding)==V_UNDEF)
+            tsFile=TStream(strFileName, "C");
+            tsFile.Write(strFileContent);
+        else
+            tsFile=GenObject("TStreamDoc", strFileName, "C", strEncoding);
+            tsFile.WriteLine(strFileContent);
+        end;
+    end; /* macro WriteFileContent */
+
+    private macro GetDirUID
+        //var d,m,y;
+        //DateSplit(Date(),dd,mm,yy);
+        //xcr"+String(yy:o:4)+String(mm:o:2)+String(dd:o:2)+""
+        return "xcr"+GetApplicationKey();
+    end; /* macro GetDirUID */
+
+    macro MakeDir2(dir1, dir2)
+        if (not MakeDir (dir1+"\\"+dir2))
+            MsgBox("can not create "+dir1+"\\"+dir2);
+            return false;
+        end;
+        return true;
+    end; /* macro MakeDir2(dir1, dir2) */
+
+    private macro getSheetName(numSheet)
+        if ((ValType(aSheetName)==V_GENOBJ) and (aSheetName.Size>=numSheet) and (numSheet>0))
+            return aSheetName[numSheet-1];
+        else
+            if (valtype(aTable)!=V_UNDEF)
+                        return "Лист"+numSheet;
+            else
+                if((valtype(strDelayedSheetName)==V_UNDEF) or (strDelayedSheetName=="")) 
+                    if (valType(numSheet)==V_UNDEF)
+                        return "Лист1";
+                    else
+                        return "Лист"+numSheet;
+                    end;
+                else
+                    return strDelayedSheetName;
+                end;
+            end;
+        end;
+    end; /* getSheetName */
+
+    /* копирует результирующий файл на терминал   */
+    /* strZipPath - путь к сформированному архиву */
+    /* strExt - расширение                        */
+    macro CopyResultFile(strZipPath, strExt)
+        var УникальноеИмя:Bool=false; /* Если имя не уникальное, то при ошибке копирования на терминал делаем имя уникальным и пытаемся задвинуть ещё раз */
+        var strLocalFolder="";
+
+            /* Если strReportName не меняли */
+            if (strReportName=="XCREPORT")
+                strReportName=StrSubst(strDialogName, " ", "_")+"_"+strBaseName;
+                УникальноеИмя=true;
+            end;
+
+            var strDest; /* пункт назначения */
+            if ((ValType(DestFolder)==V_Undef) or (""==DestFolder))
+                if (IsStandAlone())
+                    // заглушка для RSForms
+                    return;
+                end;
+                strDest="$";
+                //при копировании файлов на терминал они попадают в папку 
+                CheckTermTools();
+                strLocalFolder=CallRemoteRsl ("termtools.mac", "GetIniString", "UPDIR",".\\RSEXTT.INI");
+                if ((strLocalFolder!="") and (SubStr(strLocalFolder,StrLen(strLocalFolder))!="\\"))
+                    strLocalFolder=strLocalFolder+"\\";
+                end;
+            else
+                strDest=DestFolder;
+                if (SubStr(strDest,StrLen(strDest),1)!="\\")
+                    strDest=strDest+"\\";
+                end;
+                strLocalFolder=strDest;
+            end;
+
+            var CopyFlag=CopyFile (strZipPath, strDest+strReportName+strExt, true );
+            if (not CopyFlag and not УникальноеИмя)
+                    strReportName=strReportName+"_"+strBaseName;
+                    CopyFlag=CopyFile (strZipPath, strDest+strReportName+strExt, true );
+            end;
+
+
+            if (CopyFlag and (not bNotRun))
+                //PrintLn(aApplication[DestType]+" "+strLocalFolder+strReportName+strExt);
+                StartProg ("$"+aApplication[DestType], "\""+strLocalFolder+strReportName+strExt+"\"", true);
+            elif(not CopyFlag)
+                MsgBox("Ошибка переноса файла на терминал|"+strZipPath+"|"+strDest+strReportName+strExt);
+            elif(CopyFlag)
+                PrintLn(strZipPath,"->", "$"+strReportName+strExt);
+            end;
+
+    end; /* macro CopyResultFile */
+
+    /* добавляет в массив, можно передать переменное число аргументов, среди них могут быть массивы строк */
+    macro ZipFiles(strZipPath)
+        var i:integer;
+        var param, strParam;
+        var strFolder, strName, strExt;
+        var zip;
+        var strDir;
+
+        macro ZipItem(strItemName) //
+            if ((SubStr(strItemName,StrLen(strItemName),1)=="\\") or (SubStr(strItemName,StrLen(strItemName),1)=="/"))
+                /* folder */
+                /*
+                strItemName=SubStr(strItemName,1,StrLen(strItemName)-1);
+                ZipAdd (zip, strItemName, strDir+"\\"+strItemName, true);
+                */
+            elif (strItemName != "")
+                /* file */
+                ZipAdd (zip, StrSubst(strItemName,"\\","/"), strDir+"\\"+strItemName);
+            end;
+        end; //macro ZipItem
+        
+        strFolder=SplitFile (strZipPath, strExt, strExt);
+
+        strDir=SubStr(strZipPath,1,StrLen(strZipPath)-StrLen(strExt));
+
+        zip=CreateZip(strZipPath);
+        if (Valtype(zip)==V_MEMADDR)
+
+            for (i,2,Parmcount()-1,1) //0 - this, 1 - strDir
+                GetParm(i,param);
+                if (ValType(param)==V_STRING)
+                    ZipItem(param);
+                elif ((ValType(param) == V_GENOBJ) and IsEqClass("TArray", param))
+                    for(strParam, param)
+                        ZipItem(strParam);
+                    end;
+                end;
+            end;
+            CloseZip (zip);
+            CopyResultFile(strZipPath, strExt);
+            return true;
+        else
+            return false;
+        end;
+    end; /* macro ZipFiles() */
+
+
+    
+    macro WriteFileOpenDocumentSpreadsheet()
+        var УникальноеИмя:Bool=false; /* Если имя не уникальное, то при ошибке копирования на терминал делаем имя уникальным и пытаемся задвинуть ещё раз */
+        var tsContent;
+        var iCol=0;
+        var strZipPath:String; /* путь к результирующему архиву на СП */
+        var iSheet=0;
+        var i;
+
+
+
+        macro WriteTableToSheet(a)
+            var iRow=0;
+            iSheet=iSheet+1;
+
+            macro  WriteTableCell
+                var v;
+
+                if (IsEqClass("TArray", a) and IsEqClass("TArray", a[iRow]))
+                    v=a[iRow][iCol];
+                else
+                    v="";
+                end;
+
+                var td;
+                var strAttr="";
+
+                if   (ValType(v)==V_STRING)
+                    strAttr=" office:value-type=\"string\"";
+                    td=html(v);
+                elif (ValType(v)==V_INTEGER)
+                    strAttr=" office:value-type=\"float\" office:value=\""+String(v)+"\" table:style-name=\"kb392_int\"";
+                    td=String(v);
+                elif (ValType(v)==V_MONEY)
+                    strAttr=" office:value-type=\"currency\" office:value=\""+String(v)+"\" table:style-name=\"kb392_curr\"";
+                    td=String(v);
+                elif (ValType(v)==V_DATE)
+                    if (Date(0,0,0)==v)
+                        td=""; /* нулевая дата выводится как пустая строка */
+                    else
+                        strAttr=" office:value-type=\"date\" office:date-value=\""+ODBC_date_format(v)+"\"  table:style-name=\"kb392_date\"" ;
+                        td=String(v);
+                    end;
+                elif (ValType(v)==V_DOUBLE)
+                    strAttr=" office:value-type=\"float\" office:value=\""+String(v)+"\"";
+                    td=String(v);
+                elif (ValType(v)==V_UNDEF)
+                    td="";
+                else
+                    td=html(String(v));
+                end;
+
+                tsContent.WriteLine("<table:table-cell "+strAttr+">");
+                tsContent.WriteLine("<text:p>"+td+"</text:p>");
+                tsContent.WriteLine("</table:table-cell>");
+            end; /* macro  WriteTableCell */
+
+            tsContent.WriteLine("<table:table table:name=\""+getSheetName(iSheet)+"\" table:print=\"false\">");
+
+                var iNCol=0; /* Кол-во колонок в текущей строке */
+                var NCol=0;  /* Максимальное кол-во колонок */
+                var NRow=a.Size();
+
+            if (IsEqClass("TArray", a))
+
+
+                for (iRow, 0, a.Size()-1,1)
+                    if(ValType(a[iRow])==V_UNDEF)
+                        //PrintLn("<!-- (empty string) -->");
+                    else
+                        iCol=0;
+                        tsContent.WriteLine("<table:table-row>");
+                        while (iCol<a[iRow].Size())
+                            WriteTableCell();
+                            iCol=iCol+1;
+                        end;
+                        tsContent.WriteLine("</table:table-row>");
+                    end;
+                end; //for
+            end;
+            tsContent.WriteLine("</table:table>");
+        end; //macro WriteTableToSheet
+
+        strBaseName=GetDirUID();
+        var strDir=strTxtDir+"\\"+strBaseName;
+        if (not MakeDir (strDir))
+            MsgBox("can not create "+strDir);
+            return false;
+        end;
+        WriteFileContent(strDir+"\\"+"mimetype.","application/vnd.oasis.opendocument.spreadsheet");
+        if (not MakeDir (strDir+"\\META-INF"))
+            MsgBox("can not create "+strDir+"\\META-INF");
+            return false;
+        end;
+        WriteFileContent(strDir+"\\META-INF\\manifest.xml", strXmlHeader+"\n"+
+                                "<manifest:manifest xmlns:manifest=\"urn:oasis:names:tc:opendocument:xmlns:manifest:1.0\">\n"+
+                                " <manifest:file-entry manifest:media-type=\"application/vnd.oasis.opendocument.spreadsheet\" manifest:version=\"1.2\" manifest:full-path=\"/\"/>\n"+
+                                " <manifest:file-entry manifest:media-type=\"text/xml\" manifest:full-path=\"META-INF/manifest.xml\"/>\n"+
+                                " <manifest:file-entry manifest:media-type=\"text/xml\" manifest:full-path=\"content.xml\"/>\n"+
+                                " <manifest:file-entry manifest:media-type=\"text/xml\" manifest:full-path=\"styles.xml\"/>\n"+
+                                " <manifest:file-entry manifest:media-type=\"text/xml\" manifest:full-path=\"settings.xml\"/>\n"+
+                                " <manifest:file-entry manifest:media-type=\"text/plain\" manifest:full-path=\"mimetype\"/>\n"+
+                                "</manifest:manifest>");
+        WriteFileContent(strDir+"\\styles.xml", strXmlHeader+"\n"+
+                                "<office:document-styles xmlns:office=\"urn:oasis:names:tc:opendocument:xmlns:office:1.0\">\n"+
+                                "</office:document-styles>");
+        var strContentFilePath=strDir+"\\"+"content.xml";
+        tsContent=TStreamDoc(strContentFilePath, "C","utf8");
+        tsContent.WriteLine(strXmlHeader);
+        tsContent.WriteLine(strXmlODFRootTag);
+        tsContent.WriteLine("<office:automatic-styles>");
+        tsContent.WriteLine("<number:number-style style:name=\"N1\">");
+        tsContent.WriteLine("<number:number number:decimal-places=\"0\" number:min-integer-digits=\"1\" />");
+        tsContent.WriteLine("</number:number-style>");
+
+        tsContent.WriteLine("<number:number-style style:name=\"N5\">");
+        tsContent.WriteLine("<number:number number:decimal-places=\"2\" number:grouping=\"true\" number:min-integer-digits=\"1\" />");
+        tsContent.WriteLine("</number:number-style>");
+        tsContent.WriteLine("<number:date-style style:name=\"N36\" number:automatic-order=\"true\">");
+        tsContent.WriteLine("<number:day number:style=\"long\" />");
+        tsContent.WriteLine("<number:text>.</number:text>");
+        tsContent.WriteLine("<number:month number:style=\"long\" />");
+        tsContent.WriteLine("<number:text>.</number:text>");
+        tsContent.WriteLine("<number:year number:style=\"long\" />");
+        tsContent.WriteLine("</number:date-style>");
+        tsContent.WriteLine("<style:style style:name=\"kb392_date\" style:family=\"table-cell\" style:parent-style-name=\"Default\" style:data-style-name=\"N36\" />");
+        tsContent.WriteLine("<style:style style:name=\"kb392_curr\" style:family=\"table-cell\" style:parent-style-name=\"Default\" style:data-style-name=\"N5\" />");
+        tsContent.WriteLine("<style:style style:name=\"kb392_int\"  style:family=\"table-cell\" style:parent-style-name=\"Default\" style:data-style-name=\"N1\" />");
+        tsContent.WriteLine("</office:automatic-styles>");
+
+        tsContent.WriteLine("<office:body>");
+        /* цикл по листам */
+        //var iTable=0;
+
+        tsContent.WriteLine("<office:spreadsheet>");
+        /*
+        var strSheetName:String;
+        if((valtype(strDelayedSheetName)==V_UNDEF) or (strDelayedSheetName=="")) 
+            strSheetName="Лист1";
+        else
+            strSheetName=strDelayedSheetName;
+        end;
+        */
+        
+        var aSheetData;
+        if (valtype(aTable)!=V_UNDEF)
+            for (aSheetData, aTable)
+                WriteTableToSheet(aSheetData);
+            end;
+        end;
+        //-----------------------------------------------------
+        WriteTableToSheet(aVal);
+        //-----------------------------------------------------
+
+        //АвтоФильтр
+        var flagTableDatabaseRanges=false;
+        var iAnonymousSheetCount=1; //для нумерации 
+        for(i,0,aSheetAutoFilter.Size-1, 1)
+            if((ValType(aColumnHead[i])==V_GENOBJ) and IsEqClass("TArray", aColumnHead[i]) // если есть строка-заголовок
+                and ValType(aSheetAutoFilter[i]!=V_UNDEF)  and aSheetAutoFilter[i])        // и для листа включён автофильтр
+                if (not flagTableDatabaseRanges)
+                    tsContent.WriteLine("<table:database-ranges>");
+                    flagTableDatabaseRanges=true;
+                end;
+                tsContent.WriteLine("<table:database-range table:name='__Anonymous_Sheet_DB__"+iAnonymousSheetCount+"' table:display-filter-buttons='true' table:target-range-address='"+getSheetName(i+1)+".A1:"+GetColumnAName(aColumnHead[i].Size-1)+GetNRow(i)+"'/>");
+                //tsContent.WriteLine("<autoFilter ref='A1:"+GetColumnAName(aColumnHead[iSheet-1].Size-1)+NRow+"'/>");
+
+                iAnonymousSheetCount=iAnonymousSheetCount+1;
+
+            end;
+        end;
+        if (flagTableDatabaseRanges)
+            tsContent.WriteLine("</table:database-ranges>");
+        end;
+
+        tsContent.WriteLine("</office:spreadsheet>");
+        tsContent.WriteLine("</office:body>");
+        tsContent.WriteLine("</office:document-content>");
+        //tsContent.Flush();
+        tsContent=null;
+
+
+        //-----------------------------------------------------  freeze
+        /* если мы хотим фиксировать верхнюю строку надо выводить settings.xml */
+        strContentFilePath=strDir+"\\"+"settings.xml";
+        tsContent=TStreamDoc(strContentFilePath, "C","utf8");
+        tsContent.WriteLine(strXmlHeader);
+        tsContent.WriteLine("<office:document-settings xmlns:office='urn:oasis:names:tc:opendocument:xmlns:office:1.0' xmlns:xlink='http://www.w3.org/1999/xlink' xmlns:config='urn:oasis:names:tc:opendocument:xmlns:config:1.0' xmlns:ooo='http://openoffice.org/2004/office' office:version='1.2'>");
+        tsContent.WriteLine("   <office:settings>");
+        tsContent.WriteLine("       <config:config-item-set config:name='ooo:view-settings'>");
+        tsContent.WriteLine("           <config:config-item-map-indexed config:name='Views'>");
+        tsContent.WriteLine("               <config:config-item-map-entry>");
+        tsContent.WriteLine("                   <config:config-item-map-named config:name='Tables'>");
+        for (i,1,iSheet,1)
+            if((ValType(aColumnHead[i-1])==V_GENOBJ) and IsEqClass("TArray", aColumnHead[i-1]))
+                tsContent.WriteLine("                       <config:config-item-map-entry config:name='"+GetSheetName(i)+"'>");
+                tsContent.WriteLine("                           <config:config-item config:name='VerticalSplitMode' config:type='short'>2</config:config-item>");
+                tsContent.WriteLine("                           <config:config-item config:name='VerticalSplitPosition' config:type='int'>1</config:config-item>");
+                tsContent.WriteLine("                           <config:config-item config:name='ActiveSplitRange' config:type='short'>2</config:config-item>");
+                tsContent.WriteLine("                           <config:config-item config:name='CursorPositionY' config:type='int'>1</config:config-item>");
+                tsContent.WriteLine("                           <config:config-item config:name='PositionBottom' config:type='int'>1</config:config-item>"); //если нет, то заголовок дублируется до первого скроллинга
+                tsContent.WriteLine("                       </config:config-item-map-entry>");
+            end;
+        end;
+        tsContent.WriteLine("                   </config:config-item-map-named>");
+        tsContent.WriteLine("               </config:config-item-map-entry>");
+        tsContent.WriteLine("           </config:config-item-map-indexed>");
+        tsContent.WriteLine("       </config:config-item-set>");
+        tsContent.WriteLine("   </office:settings>");
+        tsContent.WriteLine("</office:document-settings>");
+        tsContent=null;
+        
+
+        strZipPath=strDir+".ods";
+        var zip=CreateZip(strZipPath);
+        var strDest; /* пункт назначения */
+        if (Valtype(zip)==V_MEMADDR)
+            ZipAdd (zip, "mimetype", strDir+"\\"+"mimetype");
+            ZipAdd (zip, "content.xml", strDir+"\\"+"content.xml");
+            ZipAdd (zip, "styles.xml", strDir+"\\"+"styles.xml");
+            ZipAdd (zip, "settings.xml", strDir+"\\"+"settings.xml");
+            ZipAdd (zip, "META-INF", strDir+"\\"+"META-INF",true);
+            ZipAdd (zip, "META-INF\\manifest.xml", strDir+"\\META-INF\\manifest.xml");
+            CloseZip (zip);
+
+            /* Если strReportName не меняли */
+            if (strReportName=="XCREPORT")
+                strReportName=StrSubst(strDialogName, " ", "_")+"_"+strBaseName;
+                УникальноеИмя=true;
+            end;
+
+            if ((ValType(DestFolder)==V_Undef) or (""==DestFolder))
+                strDest="$";
+            else
+                strDest=DestFolder;
+                if (SubStr(strDest,StrLen(strDest),1)!="\\")
+                    strDest=strDest+"\\";
+                end;
+            end;
+
+            CopyResultFile(strZipPath,".ods");
+
+            /*
+            var CopyFlag=CopyFile (strZipPath, strDest+strReportName+".ods", true );
+            if (not CopyFlag and not УникальноеИмя)
+                    strReportName=strReportName+"_"+strBaseName;
+                    CopyFlag=CopyFile (strZipPath, strDest+strReportName+".ods", true );
+            end;
+            if (CopyFlag and (not bNotRun))
+                StartProg ("$scalc.exe", strReportName+".ods", true);
+            elif(not CopyFlag)
+                MsgBox("Ошибка переноса файла на терминал|"+strZipPath+"|"+strDest+strReportName+".ods");
+            elif(CopyFlag)
+                PrintLn(strZipPath,"->", "$"+strReportName+".ods");
+            end;
+            */
+
+        else
+            MsgBox("Can not create "+strZipPath);
+            return false;
+        end;
+
+    end; /* macro WriteFileOpenDocumentSpreadsheet() */
+
+
+    macro WriteFileXlsx()
+        var tsContent;
+        //var strZipPath:String; /* путь к результирующему архиву на СП */
+        var aStrings=TArray();
+        var iSheet=0;
+        var i;
+        var strDir;
+
+        macro  WriteTableCell(v)
+            var td;
+            var strAttr="";
+            var bEmpty=false;
+
+            if   (ValType(v)==V_STRING)
+                if (""==v)
+                    bEmpty=true;
+                else
+                    strAttr=" t='s'";
+                    td=html(aStrings.Size());
+                    aStrings[aStrings.Size()]=v;
+                end;
+            elif (ValType(v)==V_INTEGER)
+                strAttr="";
+                td=String(v);
+            elif ((ValType(v)==V_MONEY) or (ValType(v)==V_MONEYL))
+                //strAttr="";
+                strAttr=" s='2'";  //ссылка на cellXfs\xf
+                td=String(v);
+            elif (ValType(v)==V_DATE)
+                if (v==Date(0,0,0))
+                    bEmpty=true;
+                else
+                    strAttr=" s='1'";  //ссылка на cellXfs\xf
+                    td=String(Int(v-Date(30,12,1899)));
+                end;
+            elif (ValType(v)==V_DTTM)
+                    strAttr=" t='s'";
+                    td=html(aStrings.Size());
+                    aStrings[aStrings.Size()]=String(v);
+            elif (ValType(v)==V_DOUBLE)
+                //strAttr=" office:value-type=\"float\" office:value=\""+String(v)+"\"";
+                strAttr="";
+                td=String(v);
+            elif (ValType(v)==V_BOOL)
+                    strAttr=" t='b'";
+                    if (v)
+                        td=1;
+                    else
+                        td=0;
+                    end;
+            elif (ValType(v)==V_UNDEF)
+                //td="";
+                bEmpty=true;
+            elif (v==NullVal)
+                bEmpty=true;
+            else
+                    strAttr=" t='s'";
+                    td=html(aStrings.Size());
+                    aStrings[aStrings.Size()]="TYPE "+ValType(v)+" "+GetTypeName(ValType(v))+" ("+String(v)+")";
+                //td=html(String(v));
+            end;
+
+            if (bEmpty)
+                tsContent.WriteLine("  <c/>");
+            else
+                tsContent.WriteLine("  <c "+strAttr+">");
+                tsContent.WriteLine("    <v>"+td+"</v>");
+                tsContent.WriteLine("  </c>");
+            end;
+        end; /* macro  WriteTableCell */
+
+        //
+        macro WriteTableToSheet(a)
+            var iRow=0;
+            var iCol=0;
+
+            iSheet=iSheet+1;
+
+            var strContentFilePath=strDir+"\\xl\\worksheets\\"+"sheet"+iSheet+".xml";
+            tsContent=TStreamDoc(strContentFilePath, "C","utf8");
+            tsContent.WriteLine(strXmlHeader);
+            tsContent.WriteLine("<worksheet xmlns='http://schemas.openxmlformats.org/spreadsheetml/2006/main' xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships'>");
+            
+            var NRow=a.Size();
+            //------- freeze 
+            if((ValType(aColumnHead[iSheet-1])==V_GENOBJ) and IsEqClass("TArray", aColumnHead[iSheet-1]))
+                tsContent.WriteLine("<sheetViews>");
+                tsContent.WriteLine("  <sheetView workbookViewId='0' >"); //tabSelected='1'
+                tsContent.WriteLine("    <pane state='frozen' activePane='bottomLeft' topLeftCell='A2' ySplit='1'/>");
+                //<selection sqref="A2" activeCell="A2" pane="bottomLeft"/>
+                //автофильтр
+                //if(ValType(aSheetAutoFilter[iSheet-1]!=V_UNDEF)  and aSheetAutoFilter[iSheet-1])
+                //    tsContent.WriteLine("    <selection sqref='A1:"+GetColumnAName(aColumnHead[iSheet-1].Size-1)+NRow+"' pane='bottomLeft'/>");
+                //end;
+                
+                tsContent.WriteLine("  </sheetView>");
+                tsContent.WriteLine("</sheetViews>");
+                HasColumnHead=true;
+            else
+                HasColumnHead=false;
+            end;
+
+            if (ValType(aColLenLim)==V_GENOBJ)
+                tsContent.WriteLine("<cols>");
+                for (iCol,0,aColLenLim.Size-1,1)
+                    if (ValType(aColLenLim[iCol])!=V_UNDEF)
+                        tsContent.WriteLine("<col customWidth='1' width='"+aColLenLim[iCol]+"' max='"+String(iCol+1)+"' min='"+String(iCol+1)+"'/>");
+                    end;
+                end;
+                tsContent.WriteLine("</cols>");
+            end;
+
+            tsContent.WriteLine("<sheetData>");
+
+            var iNCol=0; /* Кол-во колонок в текущей строке */
+            var NCol=0;  /* Максимальное кол-во колонок */
+            while (iRow<NRow)
+                if(ValType(a[iRow])==V_UNDEF)
+                    //PrintLn("<!-- (empty string) -->");
+                else
+                    iCol=0;
+                    tsContent.WriteLine("<row r='"+String(iRow+1)+"'>");
+                    while (iCol<a[iRow].Size())
+                        WriteTableCell(a[iRow][iCol]);
+                        iCol=iCol+1;
+                    end;
+                    tsContent.WriteLine("</row>");
+                end;
+                iRow=iRow+1;
+            end;
+
+
+            tsContent.WriteLine("</sheetData>");
+            
+            //автофильтр работает если есть строка заголовка 
+            if(HasColumnHead and ValType(aSheetAutoFilter[iSheet-1]!=V_UNDEF)  and aSheetAutoFilter[iSheet-1])
+                tsContent.WriteLine("<autoFilter ref='A1:"+GetColumnAName(aColumnHead[iSheet-1].Size-1)+NRow+"'/>");
+            end;
+            tsContent.WriteLine("</worksheet>");
+
+            //tsContent.Flush();
+            tsContent=null;
+        end; //macro  WriteTableToSheet
+
+        strBaseName=GetDirUID();
+        strDir=strTxtDir+"\\"+strBaseName;
+        if (not MakeDir (strDir))
+            MsgBox("can not create "+strDir);
+            return false;
+        end;
+
+        if (not MakeDir2 (strDir,"_rels"         )) return false; end;
+        if (not MakeDir2 (strDir,"xl"            )) return false; end;
+        if (not MakeDir2 (strDir,"xl\\_rels"     )) return false; end;
+        if (not MakeDir2 (strDir,"xl\\theme"     )) return false; end;
+        if (not MakeDir2 (strDir,"xl\\worksheets")) return false; end;
+
+        var aSheetData;
+        if (valtype(aTable)!=V_UNDEF)
+            for (aSheetData, aTable)
+                WriteTableToSheet(aSheetData);
+            end;
+        end;
+        //-----------------------------------------------------
+        WriteTableToSheet(aVal);
+        //-----------------------------------------------------
+
+        var strSheetInfo="";
+        var strSharedStrings="";
+
+        for (i,1,iSheet,1)
+            strSheetInfo=strSheetInfo+"<Override ContentType='application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml' PartName='/xl/worksheets/sheet"+i+".xml'/>"+"\n";
+        end;
+        
+        if (aStrings.size>0)
+            strSharedStrings = "<Override ContentType='application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml' PartName='/xl/sharedStrings.xml'/>"+"\n";
+        else
+            strSharedStrings="";
+        end;
+
+        WriteFileContent(strDir+"\\"+"[Content_Types].xml", strXmlHeader+"\n"+
+            "<Types xmlns='http://schemas.openxmlformats.org/package/2006/content-types'>"+"\n"+
+            "<Override ContentType='application/vnd.openxmlformats-officedocument.theme+xml' PartName='/xl/theme/theme1.xml'/>"+"\n"+
+            "<Override ContentType='application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml' PartName='/xl/styles.xml'/>"+"\n"+
+            "<Default ContentType='application/vnd.openxmlformats-package.relationships+xml' Extension='rels'/>"+"\n"+
+            "<Default ContentType='application/xml' Extension='xml'/>"+"\n"+
+            "<Override ContentType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml' PartName='/xl/workbook.xml'/>"+"\n"+
+            strSheetInfo +
+            strSharedStrings + 
+            "</Types>");
+
+        WriteFileContent(strDir+"\\_rels\\"+".rels", strXmlHeader+"\n"+
+            "<Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'>\n"+
+            "<Relationship Target='xl/workbook.xml' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument' Id='rId1'/>\n"+
+            "</Relationships>");
+
+
+        strSheetInfo="";
+        for (i,1,iSheet,1)
+            strSheetInfo=strSheetInfo+"<Relationship Target='worksheets/sheet"+i+".xml' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet' Id='rId"+i+"'/>\n";
+        end;
+
+
+        if (aStrings.size>0)
+            strSharedStrings = "<Relationship Target='sharedStrings.xml' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings' Id='rId"+String(iSheet+3)+"'/>\n";
+        else
+            strSharedStrings="";
+        end;
+
+        WriteFileContent(strDir+"\\xl\\_rels\\"+"workbook.xml.rels", strXmlHeader+"\n"+
+            "<Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'>\n"+
+            strSheetInfo+
+            strSharedStrings+
+            "<Relationship Target='styles.xml' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles' Id='rId"+String(iSheet+2)+"'/>\n"+
+            "<Relationship Target='theme/theme1.xml' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme' Id='rId"+String(iSheet+1)+"'/>\n"+
+            "</Relationships>");
+
+        WriteFileContent(strDir+"\\xl\\theme\\"+"theme1.xml", strXmlHeader+"\n"+
+             "<a:theme name='Тема Office' xmlns:a='http://schemas.openxmlformats.org/drawingml/2006/main'></a:theme>");
+
+        WriteFileContent(strDir+"\\xl\\"+"styles.xml", strXmlHeader+"\n"+
+            "<styleSheet xmlns='http://schemas.openxmlformats.org/spreadsheetml/2006/main'>"+"\n"+
+            "<numFmts></numFmts>"+"\n"+ //kb392_date
+            "<fonts count='1'><font><sz val='11'/><color theme='1'/><name val='Calibri'/><family val='2'/><charset val='204'/><scheme val='minor'/></font></fonts>"+"\n"+
+            "<fills count='2'><fill><patternFill patternType='none'/></fill><fill><patternFill patternType='gray125'/></fill></fills>"+"\n"+
+            "<borders count='1'><border><left/><right/><top/><bottom/><diagonal/></border></borders>"+"\n"+
+            "<cellStyleXfs count='1'><xf numFmtId='0' fontId='0' fillId='0' borderId='0'/></cellStyleXfs>"+"\n"+
+            "<cellXfs count='3'>"+"\n"+
+            " <xf numFmtId='0' fontId='0' fillId='0' borderId='0' xfId='0'/>"+"\n"+
+            " <xf numFmtId='14' fontId='0' fillId='0' borderId='0' xfId='0'/>"+"\n"+ //long date
+            " <xf numFmtId='43' fontId='0' fillId='0' borderId='0' xfId='0'/>"+"\n"+ //Финансовый
+            "</cellXfs>"+"\n"+
+            "<cellStyles count='1'><cellStyle name='Обычный' xfId='0' builtinId='0'/></cellStyles>"+"\n"+
+            "<dxfs count='0'/><tableStyles count='0' defaultTableStyle='TableStyleMedium9' defaultPivotStyle='PivotStyleLight16'/></styleSheet>",
+            "utf8");
+
+
+        strSheetInfo="";
+        for (i,1,iSheet,1)
+            strSheetInfo=strSheetInfo+"<sheet r:id='rId"+i+"' sheetId='"+i+"' name='"+getSheetName(i)+"'/>\n";
+        end;
+
+        WriteFileContent(strDir+"\\xl\\"+"workbook.xml", strXmlHeader+"\n"+
+            "<workbook xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships' xmlns='http://schemas.openxmlformats.org/spreadsheetml/2006/main'>\n"+
+            "<fileVersion rupBuild='4506' lowestEdited='4' lastEdited='4' appName='xl'/>\n"+
+            "<workbookPr defaultThemeVersion='124226'/>\n"+
+            "<bookViews>\n"+
+            "<workbookView windowHeight='8835' windowWidth='21900' yWindow='75' xWindow='480'/>\n"+
+            "</bookViews>\n"+
+            "<sheets>\n"+
+            strSheetInfo+
+            "</sheets>\n"+
+            "<calcPr calcId='125725'/>\n"+
+            "</workbook>",
+            "utf8");
+
+
+        var nameItemSharedStrings;
+        var iString;
+
+        if (aStrings.Size>0)
+            tsContent=TStreamDoc(strDir+"\\xl\\"+"sharedStrings.xml", "C","utf8");
+            tsContent.WriteLine(strXmlHeader);
+            tsContent.WriteLine("<sst xmlns='http://schemas.openxmlformats.org/spreadsheetml/2006/main'>"); //count='' uniqueCount=''
+            for(iString,0,aStrings.Size-1,1)
+                tsContent.WriteLine("<si><t>"+html(aStrings[iString])+"</t></si>"); 
+            end;
+            tsContent.WriteLine("</sst>");
+            tsContent=null;
+            nameItemSharedStrings = "xl\\sharedStrings.xml"; 
+        else
+            nameItemSharedStrings = null; // тогда в зип этот элемент проигнорируется
+        end;
+
+        var aSheetFile=TArray();
+        for (i,1,iSheet,1)
+            aSheetFile[aSheetFile.size]="xl\\worksheets\\sheet"+i+".xml";
+        end;
+
+        var strZipPath=strDir+".xlsx";
+        ZipFiles(strZipPath,
+                 "[Content_Types].xml",
+                 "_rels\\",
+                 "_rels\\.rels",
+                 "xl\\",
+                 "xl\\_rels\\",
+                 "xl\\_rels\\workbook.xml.rels",
+                 "xl\\theme\\",
+                 "xl\\theme\\theme1.xml",
+                 "xl\\worksheets\\",
+                 aSheetFile,                   //"xl\\worksheets\\sheet1.xml",
+                 nameItemSharedStrings, // "xl\\sharedStrings.xml" или null
+                 "xl\\styles.xml",
+                 "xl\\workbook.xml");
+
+    end; /* macro WriteFileXlsx */
+
+    
+
+    macro WriteFile()
+        if (Prepared and (not Writed))
+            GenRun(this,"WriteFile"+strDestType);
+            Writed=true;
+        end;
+
+        if (iStrCounter>0)
+            if (not bSilent)
+                MsgBox("Сформирован файл " + strTxtRepPath);
+                ViewFile(strTxtRepPath);
+             end;
+        end;
+    end; /* WriteFile */
+
+
+    macro Destructor()
+        if (not Writed)
+            WriteFile;
+        end;
+    end; /* Destructor */
+
+
+    Constructor();
+
+
+end; /* Class XCReport */
